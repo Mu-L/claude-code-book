@@ -704,30 +704,124 @@ v2 认证（安全的多会话）：
 
 ### 12.4.5 VS Code 和 JetBrains 扩展集成
 
-IDE 扩展通过 `sse-ide` 和 `ws-ide` 类型的 MCP 服务器与 Claude CLI 通信。这些是内部专用类型，包含 IDE 标识信息（如 IDE 名称、是否在 Windows 上运行）。
+IDE 扩展通过 `sse-ide` 和 `ws-ide` 类型的 MCP 服务器与 Claude CLI 通信。这些是内部专用类型，在标准 SSE/WebSocket 协议基础上增加了 IDE 标识信息（如 IDE 名称、是否在 Windows 上运行）。这种"协议变体"的设计让 Bridge 系统能够根据客户端类型提供差异化的服务。
 
-集成流程如下：
+**集成流程详解**
 
-1. IDE 扩展启动 MCP 服务器，监听本地端口
-2. IDE 扩展将服务器 URL 通过环境变量或 CLI 参数传递给 Claude Code
-3. Claude Code 建立 SSE/WebSocket 连接
-4. IDE 扩展通过 MCP 协议提供文件操作、诊断信息等工具
-5. Claude Code 将这些工具映射为 `mcp__ide__*` 命名空间的工具
+IDE 集成的完整流程涉及多个组件的协作：
 
-IDE 工具受到白名单限制，只有 `mcp__ide__executeCode` 和 `mcp__ide__getDiagnostics` 被允许加载。
+```
+阶段1：启动与注册
+┌─────────────┐                          ┌──────────────┐
+│ IDE 扩展    │  启动本地 MCP 服务器     │ MCP 服务器   │
+│ (VS Code)   │ ──────────────────────► │ (端口 12345) │
+│             │                          │              │
+│             │  将 URL 传递给 CLI       │              │
+│             │ ──────────────────────► │              │
+└─────────────┘                          └──────────────┘
+       │                                       ▲
+       │ 通过环境变量或 CLI 参数                  │
+       │ 传递 MCP 服务器 URL                      │
+       ▼                                       │
+┌─────────────┐   建立 SSE/WS 连接            │
+│ Claude CLI  │ ───────────────────────────► │
+│             │                              │
+│             │   tools/list 请求            │
+│             │ ───────────────────────────► │
+│             │                              │
+│             │   返回工具列表                │
+│             │ ◄─────────────────────────── │
+│             │                              │
+│             │   注册为 mcp__ide__* 工具     │
+└─────────────┘                              │
+       │                                     │
+       ▼                                     │
+阶段2：工具使用                                │
+┌─────────────┐   调用 mcp__ide__getDiagnostics
+│ Claude 模型 │ ───────────────────────────► │
+│ (决策层)    │                              │
+│             │   返回诊断结果               │
+│             │ ◄─────────────────────────── │
+│             │                              │
+│             │   调用 mcp__ide__executeCode │
+│             │ ───────────────────────────► │
+│             │                              │
+│             │   在 IDE 中执行代码          │
+└─────────────┘                              │
+```
+
+**五个步骤的详细说明：**
+
+1. **IDE 扩展启动 MCP 服务器**：当用户在 VS Code 中打开 Claude Code 扩展时，扩展会在本地启动一个 MCP 服务器进程，监听一个随机分配的本地端口。
+
+2. **URL 传递**：IDE 扩展将服务器 URL 通过环境变量（如 `CLAUDE_CODE_IDE_MCP_URL`）或 CLI 参数传递给 Claude Code。这个 URL 通常形如 `http://127.0.0.1:12345/mcp`。
+
+3. **建立连接**：Claude Code 启动后，读取 IDE 传递的 URL，使用 `sse-ide` 或 `ws-ide` 协议建立连接。连接建立后，Claude Code 就成为了这个 MCP 服务器的客户端。
+
+4. **工具发现**：Claude Code 通过标准的 `tools/list` 请求获取 IDE 扩展提供的工具列表。由于 IDE 类型的服务器受到工具白名单限制，只有 `executeCode` 和 `getDiagnostics` 被注册。
+
+5. **工具使用**：Claude 模型在处理用户请求时，可以调用这些 IDE 工具来获取实时诊断信息或在 IDE 上下文中执行代码。例如，当模型建议修复一个 TypeScript 类型错误时，可以通过 `executeCode` 在 IDE 中直接应用修复，然后通过 `getDiagnostics` 验证错误是否已消失。
+
+**IDE 集成的实际价值**
+
+IDE 集成的价值远超"在终端里使用 Claude Code"。通过 MCP 协议，Claude Code 获得了对 IDE 环境的"感知能力"：
+
+- **实时诊断**：`getDiagnostics` 让 Claude Code 能看到 IDE 中实时的编译错误、类型错误和 lint 警告，而不需要用户手动复制粘贴错误信息。
+- **上下文执行**：`executeCode` 让 Claude Code 的代码修复能在 IDE 的完整上下文中执行（包括项目的 TypeScript 配置、Node.js 版本、环境变量等），而不是在隔离的终端环境中。
+
+> **与第8章钩子系统的关联：** IDE 集成的 MCP 工具调用同样会触发钩子系统。例如，当 Claude Code 通过 `mcp__ide__executeCode` 在 IDE 中执行代码时，PreToolUse 钩子可以拦截这个调用，检查要执行的代码是否安全。这为 IDE 集成增加了一层额外的安全保障。
 
 ### 12.4.6 Bridge 权限门控
 
-Bridge（远程控制）功能需要 claude.ai 订阅，并通过多层门控：首先检查 feature gate 是否开启，然后验证用户是否为 claude.ai 订阅者，以及 GrowthBook 功能标志是否开启。
+Bridge（远程控制）功能不是对所有用户开放的——它需要 claude.ai 订阅，并通过多层门控。这种"层层设卡"的设计确保了远程控制功能只在受控的环境中使用。
 
-完整的诊断函数 `getBridgeDisabledReason` 依次检查：
+**为什么需要多层门控？**
 
-1. 是否为 claude.ai 订阅者（排除 Bedrock/Vertex/Foundry 等）
-2. 是否具有完整的 profile scope（排除 setup-token 等受限 token）
-3. 是否有组织 UUID（排除信息不完整的登录）
-4. GrowthBook 功能门控 `tengu_ccr_bridge` 是否开启
+远程控制功能允许外部实体（IDE、claude.ai 网页端）控制 CLI 会话——切换模型、调整参数、甚至中断执行。这种能力如果被滥用（例如，恶意网站通过 XSS 攻击控制用户的 CLI），后果将是灾难性的。多层门控的设计遵循"纵深防御"原则——即使某一层的检查被绕过，其他层仍然提供保护。
 
-API 客户端的认证使用 OAuth Bearer Token，并支持 401 时的自动 Token 刷新和重试。
+完整的诊断函数 `getBridgeDisabledReason` 依次检查四层条件：
+
+```
+Bridge 功能检查流程
+│
+├─ 第1层：订阅类型检查
+│  └─ 是否为 claude.ai 订阅者？
+│     排除 Bedrock/Vertex/Foundry 等第三方 API 用户
+│     原因：Bridge 功能依赖于 claude.ai 后端基础设施
+│     （Session-Ingress、CCR 服务），只有 claude.ai 订阅者才有访问权限
+│
+├─ 第2层：Profile 完整性检查
+│  └─ 是否具有完整的 profile scope？
+│     排除 setup-token 等受限 token
+│     原因：受限 token 只有部分 API 权限，不足以建立完整的 Bridge 连接
+│
+├─ 第3层：组织信息检查
+│  └─ 是否有组织 UUID？
+│     排除信息不完整的登录（如使用 API Key 但未关联组织）
+│     原因：Bridge 的会话管理需要组织级隔离
+│
+└─ 第4层：功能标志检查
+   └─ GrowthBook 功能门控 `tengu_ccr_bridge` 是否开启？
+      原因：功能标志允许 Anthropic 逐步灰度发布 Bridge 功能，
+      在出现问题时可以快速关闭，而不需要发布新版本
+```
+
+**API 认证与 Token 管理**
+
+API 客户端的认证使用 OAuth Bearer Token，并支持 401 时的自动 Token 刷新和重试。这个机制处理了一个常见的分布式系统问题：Token 过期。
+
+```
+API 请求流程：
+  1. 携带当前 Bearer Token 发送请求
+  2. 收到 401 Unauthorized 响应
+  3. 使用 Refresh Token 获取新的 Bearer Token
+  4. 使用新 Token 重试原始请求
+  5. 如果重试仍然 401 → Bridge 功能不可用，通知用户
+```
+
+这种"自动刷新+重试"的模式是 OAuth 2.0 的标准实践。它的好处是用户无感知——Token 过期不会中断正在进行的 Bridge 会话，系统会在后台自动处理。
+
+> **最佳实践：** 如果你需要在企业环境中使用 Bridge 功能，确保：(1) 团队成员使用 claude.ai 订阅账号登录，而非 API Key；(2) 组织 UUID 已正确配置；(3) 网络防火墙允许与 claude.ai 后端的 SSE/CCR 通信。
 
 ---
 
@@ -754,12 +848,21 @@ API 客户端的认证使用 OAuth Bearer Token，并支持 401 时的自动 Tok
 - 观察启动日志中的 MCP 连接状态
 - 尝试使用 `mcp__filesystem__*` 前缀的工具
 
+**进阶挑战：**
+- 修改 `.mcp.json`，为文件系统服务器添加自定义环境变量（如限制只读模式）
+- 在 `.claude/settings.local.json` 中配置权限规则，自动允许 `mcp__filesystem__read_file` 但保留 `mcp__filesystem__write_file` 的确认提示
+- 测试在启动后禁用文件系统服务器，观察工具列表的变化
+
 ### 练习 2：理解工具名称解析
 
 根据 `mcp__{server}__{tool}` 的命名规则，分析以下场景：
 - 解析 `mcp__github__create_issue` 会得到什么结果？
 - 构建 `mcp__my_server__read_file` 需要什么输入？
 - 包含双下划线的工具名 `mcp__my__special__tool` 会如何解析？
+
+**进阶挑战：**
+- 如果同时配置了名为 `github` 和 `git_hub` 的两个服务器，它们提供同名工具时，如何通过权限配置分别控制？
+- 在 SDK 模式下（设置 `CLAUDE_AGENT_SDK_MCP_NO_PREFIX`），如果一个 MCP 工具名为 `Read`，它会如何与内置的 Read 工具交互？
 
 ### 练习 3：配置企业级 MCP 安全策略
 
@@ -780,14 +883,81 @@ API 客户端的认证使用 OAuth Bearer Token，并支持 401 时的自动 Tok
 
 测试不同配置的服务器是否能被正确允许或阻止。
 
+**进阶挑战：**
+- 设计一个安全策略，只允许公司内部的 MCP 服务器（`*.company.com`），同时阻止所有外部公共服务器
+- 考虑如何处理"同一服务器在不同作用域中被配置"的情况——当 enterprise 配置允许了某个服务器，但 local 配置中该服务器在黑名单中，结果会怎样？
+
+### 练习 4：多服务器集成实战
+
+配置一个包含多个 MCP 服务器的复杂环境，模拟真实的开发工作流：
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxxx" }
+    },
+    "database": {
+      "type": "sse",
+      "url": "https://internal-mcp.company.com/database",
+      "headers": { "Authorization": "Bearer internal-token" }
+    },
+    "docs": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": { "BRAVE_API_KEY": "BSA_xxxx" }
+    }
+  }
+}
+```
+
+**分析任务：**
+- 每个服务器注册了哪些工具？工具的完整名称是什么？
+- 如果 GitHub 服务器连接失败，其他服务器会受到影响吗？
+- 如何为每个服务器配置不同级别的权限（如 GitHub 完全允许，数据库只允许只读操作）？
+
+### 练习 5：理解 Bridge 通信流程
+
+分析以下场景中的 Bridge 通信行为：
+
+**场景 A**：用户在 VS Code 中通过 Claude Code 扩展发送消息"修复所有 TypeScript 错误"
+1. 消息如何从 VS Code 到达 Claude CLI？
+2. Claude Code 如何调用 `getDiagnostics` 获取错误信息？
+3. 修复代码后如何通过 `executeCode` 在 IDE 中应用？
+
+**场景 B**：用户在 claude.ai 网页端远程控制一个正在运行的 CLI 会话
+1. 网页端发出 `set_model` 请求切换到 Opus 模型，CLI 如何处理？
+2. 如果 CLI 当前正在执行一个长时间的工具调用，`interrupt` 命令如何中断它？
+3. 如果用户没有 claude.ai 订阅，会在哪一层门控被拒绝？
+
 ---
 
 ## 关键要点
 
-1. **多协议支持**：MCP 支持 stdio、SSE、HTTP、WebSocket 四种外部协议，以及 sdk（内部）、sse-ide/ws-ide（IDE 专用）、claudeai-proxy（平台代理）三种内部类型
-2. **三段式命名**：`mcp__{server}__{tool}` 命名规则确保不同服务器的工具不会冲突，同时支持 SDK 模式下的前缀跳过以覆盖内置工具
-3. **多层安全策略**：denylist（绝对优先）-> allowlist（白名单门控）-> IDE 工具白名单（细粒度控制）-> 每次调用的权限确认
-4. **签名去重**：通过 `stdio:JSON.stringify([cmd,...args])` 和 `url:originalUrl` 签名确保手动配置优先于插件和连接器
-5. **Bridge 双向通信**：通过统一的 `ReplBridgeTransport` 接口抽象 v1/v2 传输差异，支持回声去重（`BoundedUUIDSet`）、控制协议和仅出站模式
-6. **SSE 序列号延续**：v2 传输在切换时携带序列号高位标记，避免服务器重放完整会话历史，是解决"消息风暴"问题的关键设计
-7. **权限门控**：Bridge 功能需要 claude.ai 订阅 + 组织 UUID + GrowthBook 功能标志三重验证，确保只有授权用户可以使用远程控制
+1. **MCP 的设计使命**：MCP 是 AI 世界的"USB-C 接口"，通过标准化协议解决工具集成的碎片化问题。其三大设计原则——协议即契约、传输无关性、安全边界内嵌——贯穿了 Claude Code 的整个 MCP 实现。
+
+2. **八种传输协议的分层设计**：从零开销的 SDK（进程内调用）到最低延迟的 stdio（进程间管道），从灵活部署的 SSE/HTTP（远程服务）到全双工的 WebSocket（实时通信），每种协议针对特定的部署场景和网络拓扑进行了优化。优先选择 stdio，只在必要时使用远程协议。
+
+3. **三段式命名的安全价值**：`mcp__{server}__{tool}` 命名规则不仅解决了工具名称冲突问题，更重要的是在权限检查时提供了独立的命名空间，防止 MCP 工具与内置工具之间的权限混淆。SDK 模式下的前缀跳过是一种高级用法，允许 MCP 工具覆盖内置工具。
+
+4. **深度防御的安全架构**：四层权限模型——企业策略（denylist > allowlist）、IDE 工具白名单、用户权限配置、运行时确认——确保即使某一层的检查被绕过，其他层仍然提供保护。这是"默认不信任"安全原则的完整体现。
+
+5. **签名去重的实用智慧**：通过 `stdio:JSON.stringify([cmd,...args])` 和 `url:originalUrl` 签名机制，系统确保基于"实际效果"而非"表面配置"进行去重。去重优先级（手动 > 插件 > 连接器）保证用户的显式配置始终优先。
+
+6. **Bridge 双向通信的复杂性管理**：30+ 个模块构成的 Bridge 系统通过统一的 `ReplBridgeTransport` 接口抽象 v1/v2 传输差异，通过三重消息过滤（权限响应 > 控制请求 > 用户消息）处理入站消息，通过 `BoundedUUIDSet` 环形缓冲区实现高效去重。
+
+7. **SSE 序列号延续是关键创新**：v2 传输在切换时携带序列号高位标记，避免服务器重放完整会话历史。这个看似微小的改进，解决了长时间运行会话中传输切换导致的"消息风暴"问题。
+
+8. **四层权限门控确保远程控制安全**：订阅类型 > Profile 完整性 > 组织信息 > 功能标志的四层检查，配合 OAuth Token 自动刷新机制，在保证安全的同时尽量减少对用户体验的影响。
+
+9. **IDE 集成的感知能力**：通过 `sse-ide`/`ws-ide` 协议和 `executeCode`/`getDiagnostics` 两个白名单工具，Claude Code 获得了对 IDE 环境的实时感知能力——从被动接收用户输入，变为主动获取诊断信息和在 IDE 上下文中执行操作。
+
+10. **与其他系统的协作关系**：MCP 工具完全融入了 Claude Code 的内部系统——经过工具系统（第3章）的注册和调度、权限管线（第4章）的四阶段检查、钩子系统（第8章）的生命周期拦截。MCP 不是独立的子系统，而是 Claude Code 工具生态的自然延伸。
+
+---
+
+> **下一章预告：** 第13章将深入 Claude Code 的流式架构与性能优化，探讨如何在保证实时响应的同时处理大量数据流——其中 MCP 工具的流式输出是一个重要的优化场景。
