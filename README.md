@@ -4,13 +4,12 @@
 
 <br/>
 
-当所有人都在教你怎么 **用** AI Agent——
-
-**这本书带你拆开它。**
+当所有人都在教你怎么 **用** AI Agent —— 这本书带你 **拆开** 它
 
 <br/>
 
 [![在线阅读](https://img.shields.io/badge/📖-在线阅读-9f7aea?style=for-the-badge)](https://lintsinghua.github.io/)
+
 [![GitHub Stars](https://img.shields.io/github/stars/lintsinghua/claude-code-book?style=social)](https://github.com/lintsinghua/claude-code-book/stargazers)
 [![License](https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-lightgrey)](LICENSE)
 
