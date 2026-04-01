@@ -1,8 +1,6 @@
 <div align="center">
 
-# 解码 Agent Harness
-
-### Claude Code 架构深度剖析
+# 《解码 Agent Harness —— Claude Code 架构深度剖析》
 
 **不做使用教程，不列 Prompt 技巧——拆解 Agent 的骨架与神经。**
 
